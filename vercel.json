@@ -1,10 +1,14 @@
 {
   "version": 2,
   "builds": [
-    { "src": "api/index.py", "use": "@vercel/python" }
+    {
+      "src": "api/index.py",
+      "use": "@vercel/python",
+      "config": { "includeFiles": ["public/**", "*.py"] }
+    }
   ],
   "routes": [
-    { "src": "/api/(.*)", "dest": "/api/index.py" }
+    { "src": "/(.*)", "dest": "/api/index.py" }
   ],
   "env": {
     "DB_PATH": "/tmp/ghost.db"

@@ -19,6 +19,13 @@ import memory
 
 app = FastAPI(title="TIBE Ghost API", version="1.0.0")
 
+STATIC_DIR = Path(__file__).parent.parent / "public"
+
+
+@app.get("/")
+def serve_index():
+    return FileResponse(str(STATIC_DIR / "index.html"), media_type="text/html")
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
