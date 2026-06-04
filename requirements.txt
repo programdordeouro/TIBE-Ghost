@@ -1,0 +1,7 @@
+anthropic
+rich
+duckduckgo-search
+fastapi
+uvicorn[standard]
+python-multipart
+mangum

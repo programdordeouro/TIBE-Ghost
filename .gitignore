@@ -1,0 +1,11 @@
+.env
+ghost.db
+__pycache__/
+*.pyc
+*.pyo
+.vercel/
+.venv/
+venv/
+*.egg-info/
+dist/
+build/
