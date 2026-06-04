@@ -11,7 +11,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 import anthropic
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, HTMLResponse
 from pydantic import BaseModel
 from mangum import Mangum
 
@@ -21,10 +21,23 @@ app = FastAPI(title="TIBE Ghost API", version="1.0.0")
 
 STATIC_DIR = Path(__file__).parent.parent / "public"
 
+# Pre-load HTML at startup so a missing file fails fast with a clear error
+_HTML: str | None = None
+_html_path = STATIC_DIR / "index.html"
+if _html_path.exists():
+    _HTML = _html_path.read_text(encoding="utf-8")
+
 
 @app.get("/")
 def serve_index():
-    return FileResponse(str(STATIC_DIR / "index.html"), media_type="text/html")
+    if _HTML:
+        return HTMLResponse(_HTML)
+    # Fallback: show what's visible for diagnosis
+    tree = [str(p) for p in Path(__file__).parent.parent.rglob("*") if p.is_file()]
+    return HTMLResponse(
+        f"<pre>index.html not found.\nSTATIC_DIR={STATIC_DIR}\nFiles:\n" + "\n".join(tree[:40]) + "</pre>",
+        status_code=200,
+    )
 
 app.add_middleware(
     CORSMiddleware,

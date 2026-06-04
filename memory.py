@@ -3,7 +3,11 @@ import sqlite3
 from datetime import datetime
 from pathlib import Path
 
-DB_PATH = Path(os.getenv("DB_PATH", str(Path(__file__).parent / "ghost.db")))
+# Vercel (and other serverless): use /tmp — project dir is read-only at runtime.
+# VERCEL env var is injected automatically by the platform.
+_local_db = str(Path(__file__).parent / "ghost.db")
+_default_db = "/tmp/ghost.db" if (os.getenv("VERCEL") or not os.access(str(Path(__file__).parent), os.W_OK)) else _local_db
+DB_PATH = Path(os.getenv("DB_PATH", _default_db))
 
 
 def _conn():
