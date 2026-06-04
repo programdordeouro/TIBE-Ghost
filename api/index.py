@@ -19,7 +19,7 @@ import memory
 
 app = FastAPI(title="TIBE Ghost API", version="1.0.0")
 
-STATIC_DIR = Path(__file__).parent.parent / "public"
+STATIC_DIR = Path(__file__).parent / "static"
 
 # Pre-load HTML at startup so a missing file fails fast with a clear error
 _HTML: str | None = None
