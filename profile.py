@@ -1,15 +1,14 @@
 import os
-import anthropic
 from dotenv import load_dotenv
 from rich.console import Console
 from rich.panel import Panel
 from rich.prompt import Prompt
 from rich.table import Table
 import memory
+import llm
 
 load_dotenv()
 console = Console()
-client = anthropic.Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
 
 QUESTIONS = [
     ("ghost_name", "Como você quer que seu Ghost se chame?"),
@@ -37,13 +36,11 @@ def run_onboarding():
         memory.save_profile(key, answer)
     console.print("\n[cyan]Analisando seu perfil...[/cyan]")
     profile_text = memory.get_profile_text()
-    response = client.messages.create(
-        model="claude-haiku-4-5-20251001",
-        max_tokens=500,
-        system="Você é um estrategista e psicólogo. Analise este perfil e identifique em exatamente 3 parágrafos: 1) O padrão central desta pessoa como ela realmente opera. 2) O maior risco invisível para seus objetivos. 3) A maior alavanca disponível que ela provavelmente não está usando. Seja direto, específico e profundo. Não seja genérico.",
-        messages=[{"role": "user", "content": f"Perfil:\n{profile_text}"}]
+    analysis = llm.chat(
+        "Você é um estrategista e psicólogo. Analise este perfil e identifique em exatamente 3 parágrafos: 1) O padrão central desta pessoa como ela realmente opera. 2) O maior risco invisível para seus objetivos. 3) A maior alavanca disponível que ela provavelmente não está usando. Seja direto, específico e profundo. Não seja genérico.",
+        [{"role": "user", "content": f"Perfil:\n{profile_text}"}],
+        500
     )
-    analysis = response.content[0].text
     memory.save_profile("deep_analysis", analysis)
     console.print(Panel(analysis, title="[bold]ANÁLISE PROFUNDA DO SEU PERFIL[/bold]", border_style="magenta"))
 

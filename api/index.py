@@ -7,7 +7,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 os.environ.setdefault("DB_PATH", "/tmp/ghost.db")
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-import anthropic
+import llm
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse
@@ -21,7 +21,6 @@ import background_mind
 app = FastAPI(title="TIBE Ghost API", version="2.0.0")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
-MODEL = "claude-haiku-4-5-20251001"
 STATIC_DIR = Path(__file__).parent / "static"
 
 _HTML: str | None = None
@@ -68,14 +67,11 @@ def analyze_profile():
     profile_text = memory.get_profile_text()
     if not memory.get_profile():
         raise HTTPException(400, "Profile not set up yet")
-    client = anthropic.Anthropic()
-    response = client.messages.create(
-        model=MODEL,
-        max_tokens=500,
-        system="Você é um estrategista e psicólogo. Analise este perfil e identifique em exatamente 3 parágrafos: 1) O padrão central desta pessoa como ela realmente opera. 2) O maior risco invisível para seus objetivos. 3) A maior alavanca disponível que ela provavelmente não está usando. Seja direto, específico e profundo. Não seja genérico.",
-        messages=[{"role": "user", "content": f"Perfil:\n{profile_text}"}]
+    analysis = llm.chat(
+        "Você é um estrategista e psicólogo. Analise este perfil e identifique em exatamente 3 parágrafos: 1) O padrão central desta pessoa como ela realmente opera. 2) O maior risco invisível para seus objetivos. 3) A maior alavanca disponível que ela provavelmente não está usando. Seja direto, específico e profundo. Não seja genérico.",
+        [{"role": "user", "content": f"Perfil:\n{profile_text}"}],
+        500
     )
-    analysis = response.content[0].text
     memory.save_profile("deep_analysis", analysis)
     return {"analysis": analysis}
 
@@ -84,7 +80,6 @@ def analyze_profile():
 
 @app.post("/api/chat")
 def chat(req: ChatRequest):
-    client = anthropic.Anthropic()
     emotion = ghost_profile.detect_emotion(req.message)
     background_mind.detect_contradiction(req.message)
 
@@ -101,13 +96,7 @@ def chat(req: ChatRequest):
         extra = "\n".join([t["thought"] for t in unshown])
         system_prompt += f"\n\nINSIGHT PARA COMPARTILHAR NATURALMENTE SE RELEVANTE:\n{extra}"
 
-    response = client.messages.create(
-        model=MODEL,
-        max_tokens=800,
-        system=system_prompt,
-        messages=messages,
-    )
-    reply = response.content[0].text
+    reply = llm.chat(system_prompt, messages, 800)
     memory.save_message(req.session_id, "user", req.message, emotion)
     memory.save_message(req.session_id, "assistant", reply)
     for t in unshown:
@@ -146,22 +135,19 @@ def get_contradictions():
 
 @app.post("/api/radar")
 def run_radar():
-    client = anthropic.Anthropic()
     p = memory.get_profile()
 
     try:
-        r = client.messages.create(
-            model=MODEL,
-            max_tokens=200,
-            system="Você gera termos de busca estratégicos. Responda APENAS com JSON válido.",
-            messages=[{"role": "user", "content": (
+        text = llm.chat(
+            "Você gera termos de busca estratégicos. Responda APENAS com JSON válido.",
+            [{"role": "user", "content": (
                 f"Perfil: objetivo={p.get('main_goal','')}, projetos={p.get('projects','')}, "
                 f"localização={p.get('location','')}, mercado={p.get('market','')}\n"
                 "Gere 5 termos de busca em inglês para encontrar oportunidades reais.\n"
                 '{"terms": ["termo1","termo2","termo3","termo4","termo5"]}'
             )}],
-        )
-        text = r.content[0].text.strip().replace("```json","").replace("```","")
+            200
+        ).replace("```json","").replace("```","")
         terms = json.loads(text).get("terms", [])
     except Exception:
         terms = [p.get("main_goal","business"), p.get("market","technology"),
@@ -184,18 +170,16 @@ def run_radar():
 
     results_text = "\n\n".join(all_results[:20])
     try:
-        r2 = client.messages.create(
-            model=MODEL,
-            max_tokens=600,
-            system="Você identifica oportunidades reais e acionáveis. Responda APENAS com JSON válido sem markdown.",
-            messages=[{"role": "user", "content": (
+        text2 = llm.chat(
+            "Você identifica oportunidades reais e acionáveis. Responda APENAS com JSON válido sem markdown.",
+            [{"role": "user", "content": (
                 f"Perfil: {p.get('main_goal','')} | {p.get('projects','')} | {p.get('location','')}\n\n"
                 f"Resultados:\n{results_text}\n\n"
                 "Identifique as 3 melhores oportunidades reais.\n"
                 '{"opportunities": [{"title":"","description":"","action":"próximo passo concreto hoje","score":8,"window":"estimativa"}]}'
             )}],
-        )
-        text2 = r2.content[0].text.strip().replace("```json","").replace("```","")
+            600
+        ).replace("```json","").replace("```","")
         opps = json.loads(text2).get("opportunities", [])
     except Exception:
         opps = []
@@ -231,12 +215,8 @@ def run_council(req: TopicRequest):
     ]
 
     def call_specialist(s):
-        c = anthropic.Anthropic()
-        r = c.messages.create(
-            model=MODEL, max_tokens=300, system=s["prompt"],
-            messages=[{"role": "user", "content": full_question}],
-        )
-        return s["name"], s["color"], r.content[0].text
+        text = llm.chat(s["prompt"], [{"role": "user", "content": full_question}], 300)
+        return s["name"], s["color"], text
 
     opinions: dict[str, dict] = {}
     with ThreadPoolExecutor(max_workers=6) as pool:
@@ -247,17 +227,17 @@ def run_council(req: TopicRequest):
 
     all_responses = "\n\n".join(f"{k}:\n{v['text']}" for k, v in opinions.items())
     p = memory.get_profile()
-    synth = anthropic.Anthropic().messages.create(
-        model=MODEL, max_tokens=150,
-        system="Você sintetiza múltiplas perspectivas de forma cirúrgica.",
-        messages=[{"role": "user", "content": (
+    synthesis = llm.chat(
+        "Você sintetiza múltiplas perspectivas de forma cirúrgica.",
+        [{"role": "user", "content": (
             f"Pergunta: {topic}\n\nRespostas:\n{all_responses}\n\n"
             f"Em exatamente 3 linhas:\nLinha 1: Maior CONSENSO\nLinha 2: Maior CONFLITO\n"
             f"Linha 3: O que {p.get('user_name','você')} deve fazer PRIMEIRO"
         )}],
+        150
     )
 
-    memory.save_action(topic, synth.content[0].text, "council")
+    memory.save_action(topic, synthesis, "council")
     order = [s["name"] for s in SPECIALISTS]
     return {
         "topic": topic,
@@ -265,7 +245,7 @@ def run_council(req: TopicRequest):
             {"name": k, "color": opinions[k]["color"], "text": opinions[k]["text"]}
             for k in order if k in opinions
         ],
-        "synthesis": synth.content[0].text,
+        "synthesis": synthesis,
     }
 
 
@@ -285,12 +265,8 @@ def run_simulation(req: TopicRequest):
     ]
 
     def call_analyst(name, color, system):
-        c = anthropic.Anthropic()
-        r = c.messages.create(
-            model=MODEL, max_tokens=300, system=system,
-            messages=[{"role": "user", "content": f"Perfil: {profile_text}\nIdeia: {topic}"}],
-        )
-        return name, color, r.content[0].text
+        text = llm.chat(system, [{"role": "user", "content": f"Perfil: {profile_text}\nIdeia: {topic}"}], 300)
+        return name, color, text
 
     results: dict[str, dict] = {}
     with ThreadPoolExecutor(max_workers=3) as pool:
@@ -299,14 +275,14 @@ def run_simulation(req: TopicRequest):
             name, color, text = future.result()
             results[name] = {"text": text, "color": color}
 
-    causal = anthropic.Anthropic().messages.create(
-        model=MODEL, max_tokens=200,
-        system="Você pensa em engenharia reversa da realidade. Seja específico e acionável.",
-        messages=[{"role": "user", "content": (
+    causal = llm.chat(
+        "Você pensa em engenharia reversa da realidade. Seja específico e acionável.",
+        [{"role": "user", "content": (
             f"Objetivo: {topic}\nPerfil: {profile_text}\n\n"
             "Quais 3 condições precisam ser verdadeiras HOJE para que esse futuro seja "
             "uma consequência inevitável em 18 meses? Máximo 150 palavras."
         )}],
+        200
     )
 
     memory.save_simulation(
@@ -314,7 +290,7 @@ def run_simulation(req: TopicRequest):
         results.get("CUSTO", {}).get("text", ""),
         results.get("RISCO", {}).get("text", ""),
         results.get("RETORNO", {}).get("text", ""),
-        causal.content[0].text,
+        causal,
     )
 
     order = ["CUSTO", "RISCO", "RETORNO"]
@@ -324,7 +300,7 @@ def run_simulation(req: TopicRequest):
             {"name": k, "color": results[k]["color"], "text": results[k]["text"]}
             for k in order if k in results
         ],
-        "causal_inversion": causal.content[0].text,
+        "causal_inversion": causal,
     }
 
 

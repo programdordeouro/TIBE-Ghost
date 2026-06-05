@@ -1,4 +1,4 @@
-anthropic
+openai
 rich
 duckduckgo-search
 python-dotenv
