@@ -3,7 +3,6 @@ import sys
 import json
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from typing import Optional
 
 os.environ.setdefault("DB_PATH", "/tmp/ghost.db")
 sys.path.insert(0, str(Path(__file__).parent.parent))
@@ -11,17 +10,20 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 import anthropic
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, HTMLResponse
+from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
 from mangum import Mangum
 
 import memory
+import profile as ghost_profile
+import background_mind
 
-app = FastAPI(title="TIBE Ghost API", version="1.0.0")
+app = FastAPI(title="TIBE Ghost API", version="2.0.0")
+app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
+MODEL = "claude-haiku-4-5-20251001"
 STATIC_DIR = Path(__file__).parent / "static"
 
-# Pre-load HTML at startup so a missing file fails fast with a clear error
 _HTML: str | None = None
 _html_path = STATIC_DIR / "index.html"
 if _html_path.exists():
@@ -32,43 +34,8 @@ if _html_path.exists():
 def serve_index():
     if _HTML:
         return HTMLResponse(_HTML)
-    # Fallback: show what's visible for diagnosis
     tree = [str(p) for p in Path(__file__).parent.parent.rglob("*") if p.is_file()]
-    return HTMLResponse(
-        f"<pre>index.html not found.\nSTATIC_DIR={STATIC_DIR}\nFiles:\n" + "\n".join(tree[:40]) + "</pre>",
-        status_code=200,
-    )
-
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
-MODEL = "claude-haiku-4-5-20251001"
-
-
-def _client() -> anthropic.Anthropic:
-    return anthropic.Anthropic()
-
-
-def _build_system(profile: dict) -> str:
-    return (
-        "IDENTIDADE DO GHOST:\n"
-        f"Nome do Ghost: {profile.get('ghost_name', 'Ghost')}\n"
-        f"Usuário: {profile.get('user_name', 'usuário')}\n"
-        f"Objetivo principal: {profile.get('main_goal', 'não definido')}\n"
-        f"Projetos ativos: {profile.get('projects', 'não definido')}\n"
-        f"Habilidades: {profile.get('skills', 'não definido')}\n"
-        f"Localização: {profile.get('location', 'não definido')}\n\n"
-        "Você é o Ghost desse usuário.\n"
-        "Você trabalha exclusivamente para os objetivos dele.\n"
-        "Você lembra de tudo que já conversaram.\n"
-        "Seja direto, estratégico e nunca genérico.\n"
-        "Nunca diga 'Como posso ajudar hoje?'.\n"
-        "Vá direto ao ponto."
-    )
+    return HTMLResponse("<pre>index.html not found\n" + "\n".join(tree[:30]) + "</pre>")
 
 
 # ── Models ────────────────────────────────────────────────────────────────────
@@ -92,37 +59,66 @@ def get_profile():
     return memory.get_profile()
 
 @app.post("/api/profile")
-def save_profile(req: ProfileField):
+def save_profile_field(req: ProfileField):
     memory.save_profile(req.key, req.value)
     return {"ok": True}
+
+@app.post("/api/profile/analyze")
+def analyze_profile():
+    profile_text = memory.get_profile_text()
+    if not memory.get_profile():
+        raise HTTPException(400, "Profile not set up yet")
+    client = anthropic.Anthropic()
+    response = client.messages.create(
+        model=MODEL,
+        max_tokens=500,
+        system="Você é um estrategista e psicólogo. Analise este perfil e identifique em exatamente 3 parágrafos: 1) O padrão central desta pessoa como ela realmente opera. 2) O maior risco invisível para seus objetivos. 3) A maior alavanca disponível que ela provavelmente não está usando. Seja direto, específico e profundo. Não seja genérico.",
+        messages=[{"role": "user", "content": f"Perfil:\n{profile_text}"}]
+    )
+    analysis = response.content[0].text
+    memory.save_profile("deep_analysis", analysis)
+    return {"analysis": analysis}
 
 
 # ── Chat ──────────────────────────────────────────────────────────────────────
 
 @app.post("/api/chat")
 def chat(req: ChatRequest):
-    client = _client()
-    profile = memory.get_profile()
+    client = anthropic.Anthropic()
+    emotion = ghost_profile.detect_emotion(req.message)
+    background_mind.detect_contradiction(req.message)
 
-    memory.save_message("user", req.message, req.session_id)
-    history = memory.get_last_n_messages(30)
-    messages = [{"role": m["role"], "content": m["content"]} for m in history]
+    history = memory.get_last_messages(35)
+    messages = [
+        {"role": m["role"], "content": m["content"]}
+        for m in history if m["role"] in ["user", "assistant"]
+    ]
+    messages.append({"role": "user", "content": req.message})
+
+    system_prompt = ghost_profile.get_system_prompt()
+    unshown = memory.get_unshown_thoughts()
+    if unshown:
+        extra = "\n".join([t["thought"] for t in unshown])
+        system_prompt += f"\n\nINSIGHT PARA COMPARTILHAR NATURALMENTE SE RELEVANTE:\n{extra}"
 
     response = client.messages.create(
         model=MODEL,
-        max_tokens=1024,
-        system=_build_system(profile),
+        max_tokens=800,
+        system=system_prompt,
         messages=messages,
     )
-
     reply = response.content[0].text
-    memory.save_message("assistant", reply, req.session_id)
-    return {"reply": reply}
+    memory.save_message(req.session_id, "user", req.message, emotion)
+    memory.save_message(req.session_id, "assistant", reply)
+    for t in unshown:
+        memory.mark_thought_shown(t["id"])
+
+    return {"reply": reply, "emotion": emotion}
 
 
 @app.get("/api/history")
 def get_history(limit: int = 20):
-    return {"messages": memory.get_last_n_messages(limit)}
+    return {"messages": memory.get_last_messages(limit)}
 
 
 @app.get("/api/sessions")
@@ -132,195 +128,84 @@ def get_sessions():
 
 @app.get("/api/briefing")
 def get_briefing():
-    client = _client()
-    last_msgs = memory.get_last_n_messages(5)
-    if not last_msgs:
-        return {"briefing": None}
+    briefing = background_mind.get_morning_briefing()
+    return {"briefing": briefing or None}
 
-    summary = "\n".join(f"{m['role']}: {m['content']}" for m in last_msgs)
-    response = client.messages.create(
-        model=MODEL,
-        max_tokens=256,
-        messages=[{
-            "role": "user",
-            "content": (
-                f"Baseado nessas memórias recentes:\n{summary}\n\n"
-                "Dê um briefing de 3 linhas sobre onde o usuário estava "
-                "e o que pode ser relevante hoje."
-            ),
-        }],
-    )
-    return {"briefing": response.content[0].text.strip()}
+
+@app.get("/api/patterns")
+def get_patterns():
+    return {"patterns": memory.get_patterns_text()}
+
+
+@app.get("/api/contradictions")
+def get_contradictions():
+    return {"contradictions": memory.get_contradictions_text()}
 
 
 # ── Radar ─────────────────────────────────────────────────────────────────────
 
 @app.post("/api/radar")
 def run_radar():
-    client = _client()
-    profile = memory.get_profile()
-
-    terms_response = client.messages.create(
-        model=MODEL,
-        max_tokens=256,
-        messages=[{
-            "role": "user",
-            "content": (
-                "Com base neste perfil:\n"
-                f"Objetivo: {profile.get('main_goal', 'não definido')}\n"
-                f"Projetos: {profile.get('projects', 'não definido')}\n"
-                f"Localização: {profile.get('location', 'não definido')}\n\n"
-                "Gere 5 termos de busca em inglês, curtos e específicos, "
-                "que encontrariam oportunidades REAIS para essa pessoa.\n"
-                'Responda APENAS com JSON: {"terms": ["termo1", ...]}\n'
-                "Sem markdown, sem explicação."
-            ),
-        }],
-    )
+    client = anthropic.Anthropic()
+    p = memory.get_profile()
 
     try:
-        terms = json.loads(terms_response.content[0].text.strip())["terms"]
+        r = client.messages.create(
+            model=MODEL,
+            max_tokens=200,
+            system="Você gera termos de busca estratégicos. Responda APENAS com JSON válido.",
+            messages=[{"role": "user", "content": (
+                f"Perfil: objetivo={p.get('main_goal','')}, projetos={p.get('projects','')}, "
+                f"localização={p.get('location','')}, mercado={p.get('market','')}\n"
+                "Gere 5 termos de busca em inglês para encontrar oportunidades reais.\n"
+                '{"terms": ["termo1","termo2","termo3","termo4","termo5"]}'
+            )}],
+        )
+        text = r.content[0].text.strip().replace("```json","").replace("```","")
+        terms = json.loads(text).get("terms", [])
     except Exception:
-        terms = ["business growth opportunities", "startup funding", "online business 2025"]
+        terms = [p.get("main_goal","business"), p.get("market","technology"),
+                 "AI automation 2025", "online business opportunity", "startup growth"]
 
     from duckduckgo_search import DDGS
-    results = []
+    all_results = []
     with DDGS() as ddgs:
         for term in terms[:5]:
             try:
-                for h in ddgs.text(term, max_results=5):
-                    results.append({
-                        "title": h.get("title", ""),
-                        "snippet": h.get("body", ""),
-                        "url": h.get("href", ""),
-                    })
+                for res in ddgs.text(term, max_results=5):
+                    all_results.append(
+                        f"TÍTULO: {res.get('title','')}\nSNIPPET: {res.get('body','')}\nURL: {res.get('href','')}"
+                    )
             except Exception:
                 pass
 
-    if not results:
-        raise HTTPException(503, "Sem resultados de busca. Tente novamente.")
+    if not all_results:
+        raise HTTPException(503, "Sem resultados de busca.")
 
-    profile_block = (
-        f"Objetivo: {profile.get('main_goal', 'não definido')}\n"
-        f"Projetos: {profile.get('projects', 'não definido')}\n"
-        f"Localização: {profile.get('location', 'não definido')}"
-    )
-    results_block = "\n\n".join(
-        f"[{i+1}] {r['title']}\n{r['snippet']}\n{r['url']}"
-        for i, r in enumerate(results[:15])
-    )
-
-    analyze_response = client.messages.create(
-        model=MODEL,
-        max_tokens=1024,
-        messages=[{
-            "role": "user",
-            "content": (
-                "Analise estes resultados de busca para alguém com este perfil:\n"
-                f"{profile_block}\n\n"
-                "Resultados encontrados:\n"
-                f"{results_block}\n\n"
-                "Identifique as 3 oportunidades mais acionáveis e específicas.\n"
-                "Para cada uma retorne JSON:\n"
-                '{"opportunities": [\n'
-                '  {"title": "...", "description": "...", "action": "próximo passo concreto", "score": 1-10}\n'
-                "]}\n"
-                "Apenas JSON, sem markdown."
-            ),
-        }],
-    )
-
+    results_text = "\n\n".join(all_results[:20])
     try:
-        opportunities = json.loads(analyze_response.content[0].text.strip())["opportunities"]
-        for opp in opportunities:
-            memory.save_opportunity(
-                opp.get("title", ""),
-                opp.get("description", ""),
-                float(opp.get("score", 5)),
-            )
-        return {"opportunities": opportunities, "terms": terms}
-    except Exception:
-        return {"opportunities": [], "raw": analyze_response.content[0].text, "terms": terms}
-
-
-# ── Simulate ──────────────────────────────────────────────────────────────────
-
-@app.post("/api/simulate")
-def run_simulation(req: TopicRequest):
-    topic = req.topic.strip()
-    if not topic:
-        raise HTTPException(400, "Topic required")
-
-    profile = memory.get_profile()
-    profile_str = (
-        f"Objetivo: {profile.get('main_goal', 'não definido')} | "
-        f"Projetos: {profile.get('projects', 'não definido')} | "
-        f"Localização: {profile.get('location', 'não definido')}"
-    )
-
-    ANALYSTS = {
-        "cost": {
-            "label": "Analista de Custos",
-            "system": (
-                f"Você analisa APENAS custos e recursos.\n"
-                f"Seja específico com números quando possível.\n"
-                f"Para a ideia '{topic}' e perfil '{profile_str}':\n"
-                "Liste: investimento inicial estimado, custos mensais, "
-                "tempo necessário, recursos humanos. Máximo 200 palavras."
-            ),
-        },
-        "risk": {
-            "label": "Analista de Riscos",
-            "system": (
-                f"Você analisa APENAS riscos e o que pode dar errado.\n"
-                f"Seja brutalmente honesto, não otimista.\n"
-                f"Para a ideia '{topic}' e perfil '{profile_str}':\n"
-                "Liste os 4 principais riscos com probabilidade (alta/média/baixa) "
-                "e como mitigar cada um. Máximo 200 palavras."
-            ),
-        },
-        "return": {
-            "label": "Analista de Retorno",
-            "system": (
-                f"Você analisa APENAS potencial de retorno e upside.\n"
-                f"Base suas estimativas em dados reais quando possível.\n"
-                f"Para a ideia '{topic}' e perfil '{profile_str}':\n"
-                "Projete cenário pessimista, realista e otimista para 6 e 12 meses. "
-                "Máximo 200 palavras."
-            ),
-        },
-    }
-
-    def call_analyst(key: str):
-        c = anthropic.Anthropic()
-        r = c.messages.create(
+        r2 = client.messages.create(
             model=MODEL,
-            max_tokens=512,
-            system=ANALYSTS[key]["system"],
-            messages=[{"role": "user", "content": f"Analise: {topic}"}],
+            max_tokens=600,
+            system="Você identifica oportunidades reais e acionáveis. Responda APENAS com JSON válido sem markdown.",
+            messages=[{"role": "user", "content": (
+                f"Perfil: {p.get('main_goal','')} | {p.get('projects','')} | {p.get('location','')}\n\n"
+                f"Resultados:\n{results_text}\n\n"
+                "Identifique as 3 melhores oportunidades reais.\n"
+                '{"opportunities": [{"title":"","description":"","action":"próximo passo concreto hoje","score":8,"window":"estimativa"}]}'
+            )}],
         )
-        return key, r.content[0].text.strip()
+        text2 = r2.content[0].text.strip().replace("```json","").replace("```","")
+        opps = json.loads(text2).get("opportunities", [])
+    except Exception:
+        opps = []
 
-    results = {}
-    with ThreadPoolExecutor(max_workers=3) as pool:
-        futures = {pool.submit(call_analyst, k): k for k in ANALYSTS}
-        for future in as_completed(futures):
-            k, text = future.result()
-            results[k] = text
-
-    memory.save_simulation(
-        topic,
-        results.get("cost", ""),
-        results.get("risk", ""),
-        results.get("return", ""),
-    )
-
-    return {
-        "topic": topic,
-        "cost":   {"label": ANALYSTS["cost"]["label"],   "text": results.get("cost", "")},
-        "risk":   {"label": ANALYSTS["risk"]["label"],   "text": results.get("risk", "")},
-        "return": {"label": ANALYSTS["return"]["label"], "text": results.get("return", "")},
-    }
+    for opp in opps:
+        memory.save_opportunity(
+            opp.get("title",""), opp.get("description",""),
+            opp.get("action",""), opp.get("score",5), opp.get("window","indefinida"),
+        )
+    return {"opportunities": opps, "terms": terms}
 
 
 # ── Council ───────────────────────────────────────────────────────────────────
@@ -331,62 +216,115 @@ def run_council(req: TopicRequest):
     if not topic:
         raise HTTPException(400, "Topic required")
 
-    profile = memory.get_profile()
-    profile_str = (
-        f"Objetivo: {profile.get('main_goal', 'não definido')} | "
-        f"Projetos: {profile.get('projects', 'não definido')} | "
-        f"Habilidades: {profile.get('skills', 'não definido')}"
-    )
+    profile_text = memory.get_profile_text()
+    last = memory.get_last_messages(10)
+    context = "\n".join([f"{m['role']}: {m['content'][:100]}" for m in last])
+    full_question = f"Contexto do usuário:\n{profile_text}\n\nHistórico recente:\n{context}\n\nPergunta: {topic}"
 
-    EXPERTS = [
-        {"key": "strategist",  "label": "Estrategista", "system": "Você é um estrategista de crescimento agressivo.\nPensa em escala, vantagem competitiva e timing.\nSeja direto. Sem floreios. Máximo 150 palavras.\nResponda sempre com: ponto principal, por quê agora, próximo passo."},
-        {"key": "scientist",   "label": "Cientista",    "system": "Você é um cientista cético que exige evidências.\nQuestione suposições. Peça dados. Aponte o que não foi testado.\nMáximo 150 palavras. Sempre termine com uma pergunta desafiadora."},
-        {"key": "investor",    "label": "Investidor",   "system": "Você é um investidor anjo experiente.\nPensa em ROI, risco de capital, exit, competição.\nMáximo 150 palavras. Seja frio e calculista."},
-        {"key": "philosopher", "label": "Filósofo",     "system": "Você pensa em consequências de segunda e terceira ordem.\nÉtica, impacto de longo prazo, o que se perde ao ganhar.\nMáximo 150 palavras. Faça o usuário pensar diferente."},
-        {"key": "hacker",      "label": "Hacker",       "system": "Você encontra o caminho mais rápido e barato para testar qualquer ideia.\nSem recursos? Sem problema. Pensa em MVP em 48h, gambiarras inteligentes.\nMáximo 150 palavras. Seja prático e criativo."},
+    SPECIALISTS = [
+        {"name": "ESTRATEGISTA", "color": "blue",    "prompt": "Você é um estrategista de crescimento agressivo. Pensa em vantagem competitiva, timing e posicionamento. Seja direto. Sem floreios. Máximo 180 palavras. Formato: PONTO CENTRAL / POR QUE AGORA / PRÓXIMO PASSO"},
+        {"name": "CIENTISTA",    "color": "cyan",    "prompt": "Você é um cientista cético que exige evidências. Questione suposições. Identifique o que não foi testado. Máximo 180 palavras. Termine sempre com uma pergunta desafiadora."},
+        {"name": "INVESTIDOR",   "color": "green",   "prompt": "Você é um investidor anjo experiente e frio. Pensa em ROI, risco de capital, competição, exit. Máximo 180 palavras. Dê um veredito claro no final."},
+        {"name": "FILÓSOFO",     "color": "magenta", "prompt": "Você pensa em consequências de segunda e terceira ordem. O que se perde ao ganhar? Quais os efeitos invisíveis? Máximo 180 palavras. Faça o usuário pensar diferente."},
+        {"name": "ADVERSÁRIO",   "color": "red",     "prompt": "Você pensa como o maior concorrente dessa pessoa pensaria. O que você faria para destruir o que ela está construindo? Onde está a vulnerabilidade real? Máximo 180 palavras."},
+        {"name": "HACKER",       "color": "yellow",  "prompt": "Você encontra o caminho mais rápido e mais barato para testar qualquer ideia. MVP em 48h. Gambiarras inteligentes. Zero recursos. Máximo 180 palavras. Seja concreto e criativo."},
     ]
 
-    def call_expert(expert: dict):
+    def call_specialist(s):
         c = anthropic.Anthropic()
         r = c.messages.create(
-            model=MODEL,
-            max_tokens=384,
-            system=expert["system"],
-            messages=[{"role": "user", "content": f"Tema: {topic}\nPerfil do usuário: {profile_str}"}],
+            model=MODEL, max_tokens=300, system=s["prompt"],
+            messages=[{"role": "user", "content": full_question}],
         )
-        return expert["key"], r.content[0].text.strip()
+        return s["name"], s["color"], r.content[0].text
 
-    opinions: dict[str, str] = {}
-    with ThreadPoolExecutor(max_workers=5) as pool:
-        futures = {pool.submit(call_expert, e): e for e in EXPERTS}
+    opinions: dict[str, dict] = {}
+    with ThreadPoolExecutor(max_workers=6) as pool:
+        futures = {pool.submit(call_specialist, s): s for s in SPECIALISTS}
         for future in as_completed(futures):
-            k, text = future.result()
-            opinions[k] = text
+            name, color, text = future.result()
+            opinions[name] = {"text": text, "color": color}
 
-    block = "\n\n".join(
-        f"{e['label'].upper()}:\n{opinions.get(e['key'], '')}"
-        for e in EXPERTS
-    )
-    synth = _client().messages.create(
-        model=MODEL,
-        max_tokens=128,
-        messages=[{
-            "role": "user",
-            "content": (
-                f"Com base nestas 5 perspectivas sobre '{topic}':\n\n{block}\n\n"
-                "Qual é o maior ponto de consenso e o maior ponto de conflito?\n"
-                "2 frases apenas."
-            ),
-        }],
+    all_responses = "\n\n".join(f"{k}:\n{v['text']}" for k, v in opinions.items())
+    p = memory.get_profile()
+    synth = anthropic.Anthropic().messages.create(
+        model=MODEL, max_tokens=150,
+        system="Você sintetiza múltiplas perspectivas de forma cirúrgica.",
+        messages=[{"role": "user", "content": (
+            f"Pergunta: {topic}\n\nRespostas:\n{all_responses}\n\n"
+            f"Em exatamente 3 linhas:\nLinha 1: Maior CONSENSO\nLinha 2: Maior CONFLITO\n"
+            f"Linha 3: O que {p.get('user_name','você')} deve fazer PRIMEIRO"
+        )}],
     )
 
+    memory.save_action(topic, synth.content[0].text, "council")
+    order = [s["name"] for s in SPECIALISTS]
     return {
         "topic": topic,
-        "experts": [
-            {"key": e["key"], "label": e["label"], "text": opinions.get(e["key"], "")}
-            for e in EXPERTS
+        "specialists": [
+            {"name": k, "color": opinions[k]["color"], "text": opinions[k]["text"]}
+            for k in order if k in opinions
         ],
-        "synthesis": synth.content[0].text.strip(),
+        "synthesis": synth.content[0].text,
+    }
+
+
+# ── Simulation ────────────────────────────────────────────────────────────────
+
+@app.post("/api/simulate")
+def run_simulation(req: TopicRequest):
+    topic = req.topic.strip()
+    if not topic:
+        raise HTTPException(400, "Topic required")
+
+    profile_text = memory.get_profile_text()
+    ANALYSTS = [
+        ("CUSTO",   "blue",   "Você analisa APENAS custos e recursos necessários. Seja específico com números. Máximo 200 palavras. Liste investimento inicial, custos mensais, tempo, equipe."),
+        ("RISCO",   "yellow", "Você analisa APENAS riscos. Seja brutalmente honesto. Nunca seja otimista. Liste 4 riscos principais com probabilidade alta/media/baixa e como mitigar. Máximo 200 palavras."),
+        ("RETORNO", "green",  "Você analisa APENAS potencial de retorno. Use dados reais quando possível. Projete cenário pessimista, realista e otimista para 6 e 12 meses. Máximo 200 palavras."),
+    ]
+
+    def call_analyst(name, color, system):
+        c = anthropic.Anthropic()
+        r = c.messages.create(
+            model=MODEL, max_tokens=300, system=system,
+            messages=[{"role": "user", "content": f"Perfil: {profile_text}\nIdeia: {topic}"}],
+        )
+        return name, color, r.content[0].text
+
+    results: dict[str, dict] = {}
+    with ThreadPoolExecutor(max_workers=3) as pool:
+        futures = [pool.submit(call_analyst, *a) for a in ANALYSTS]
+        for future in as_completed(futures):
+            name, color, text = future.result()
+            results[name] = {"text": text, "color": color}
+
+    causal = anthropic.Anthropic().messages.create(
+        model=MODEL, max_tokens=200,
+        system="Você pensa em engenharia reversa da realidade. Seja específico e acionável.",
+        messages=[{"role": "user", "content": (
+            f"Objetivo: {topic}\nPerfil: {profile_text}\n\n"
+            "Quais 3 condições precisam ser verdadeiras HOJE para que esse futuro seja "
+            "uma consequência inevitável em 18 meses? Máximo 150 palavras."
+        )}],
+    )
+
+    memory.save_simulation(
+        topic,
+        results.get("CUSTO", {}).get("text", ""),
+        results.get("RISCO", {}).get("text", ""),
+        results.get("RETORNO", {}).get("text", ""),
+        causal.content[0].text,
+    )
+
+    order = ["CUSTO", "RISCO", "RETORNO"]
+    return {
+        "topic": topic,
+        "analysts": [
+            {"name": k, "color": results[k]["color"], "text": results[k]["text"]}
+            for k in order if k in results
+        ],
+        "causal_inversion": causal.content[0].text,
     }
 
 

@@ -1,141 +1,115 @@
+import os
+import anthropic
+from dotenv import load_dotenv
 from rich.console import Console
-from rich.table import Table
 from rich.panel import Panel
 from rich.prompt import Prompt
-from rich.text import Text
-from memory import get_profile, save_profile
+from rich.table import Table
+import memory
 
+load_dotenv()
 console = Console()
-
-FIELDS = {
-    "ghost_name": "Nome do Ghost",
-    "user_name":  "Seu nome real",
-    "main_goal":  "Objetivo principal (12 meses)",
-    "projects":   "Projetos ativos",
-    "skills":     "Habilidades principais",
-    "location":   "País / Cidade",
-}
+client = anthropic.Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
 
 QUESTIONS = [
     ("ghost_name", "Como você quer que seu Ghost se chame?"),
-    ("user_name",  "Qual é o seu nome real?"),
-    ("main_goal",  "Em uma frase: qual é o seu maior objetivo nos próximos 12 meses?"),
-    ("projects",   "Liste até 3 projetos ativos (separe por vírgula):"),
-    ("skills",     "Quais são suas 3 principais habilidades?"),
-    ("location",   "Em qual país/cidade você está?"),
+    ("user_name", "Qual é o seu nome?"),
+    ("location", "Cidade e país onde você está?"),
+    ("main_goal", "Em uma frase: qual é o maior objetivo da sua vida nos próximos 2 anos?"),
+    ("projects", "Quais projetos você está trabalhando agora? (separe por vírgula)"),
+    ("skills", "Quais são suas 3 principais habilidades?"),
+    ("biggest_fear", "Qual é o seu maior medo em relação aos seus objetivos?"),
+    ("past_failures", "O que você já tentou que não funcionou?"),
+    ("future_self", "Descreva quem você quer ser daqui a 5 anos com detalhes."),
+    ("market", "Em qual nicho ou mercado você quer ter impacto?"),
 ]
 
-
-def _onboarding():
-    console.print(
-        Panel(
-            Text("Bem-vindo ao TIBE Ghost\nVamos configurar seu perfil.", justify="center"),
-            border_style="cyan",
-            title="[bold cyan]Onboarding[/bold cyan]",
-        )
-    )
-    console.print()
-
+def run_onboarding():
+    console.print(Panel(
+        "[bold cyan]Bem-vindo ao TIBE Ghost.[/bold cyan]\n"
+        "Antes de começar, preciso te conhecer de verdade.\n"
+        "Responda com honestidade. Quanto mais real, mais poderoso.",
+        title="TIBE GHOST — INICIANDO",
+        border_style="cyan"
+    ))
     for key, question in QUESTIONS:
-        answer = Prompt.ask(f"[bold cyan]{question}[/bold cyan]").strip()
-        while not answer:
-            console.print("[red]Campo obrigatório.[/red]")
-            answer = Prompt.ask(f"[bold cyan]{question}[/bold cyan]").strip()
-        save_profile(key, answer)
-
-    console.print()
-    console.print(Panel("[green]Perfil criado. Seu Ghost está pronto.[/green]", border_style="green"))
-    console.print()
-
-
-def _show_table(profile: dict):
-    table = Table(show_header=True, header_style="bold magenta", border_style="magenta")
-    table.add_column("Campo", style="cyan", width=30)
-    table.add_column("Valor", style="white")
-
-    for key, label in FIELDS.items():
-        table.add_row(label, profile.get(key, "[dim]não definido[/dim]"))
-
-    console.print(table)
-
-
-def _edit(profile: dict):
-    label_to_key = {label.lower(): key for key, label in FIELDS.items()}
-    key_set = set(FIELDS.keys())
-
-    while True:
-        console.print(
-            "\n[dim]Digite o nome do campo para editar (ex: ghost_name, main_goal) "
-            "ou [bold]Enter[/bold] para sair:[/dim]"
-        )
-        field = Prompt.ask("Campo").strip().lower()
-
-        if not field:
-            break
-
-        # aceita tanto a chave direta quanto o label parcial
-        matched_key = None
-        if field in key_set:
-            matched_key = field
-        else:
-            for label, key in label_to_key.items():
-                if field in label:
-                    matched_key = key
-                    break
-
-        if not matched_key:
-            console.print(f"[red]Campo '{field}' não encontrado.[/red] Campos disponíveis: {', '.join(FIELDS.keys())}")
-            continue
-
-        current = profile.get(matched_key, "")
-        label = FIELDS[matched_key]
-        new_value = Prompt.ask(f"[bold cyan]{label}[/bold cyan]", default=current).strip()
-
-        if new_value and new_value != current:
-            save_profile(matched_key, new_value)
-            profile[matched_key] = new_value
-            console.print(f"[green]'{label}' atualizado.[/green]")
-
-    console.print()
-
-
-def run():
-    profile = get_profile()
-    is_empty = not any(k in profile for k in FIELDS)
-
-    if is_empty:
-        _onboarding()
-    else:
-        console.print(
-            Panel(
-                Text("Perfil Ghost", justify="center", style="bold"),
-                border_style="magenta",
-            )
-        )
-        _show_table(profile)
-        _edit(profile)
-
-
-def get_system_prompt_injection() -> str:
-    profile = get_profile()
-
-    ghost_name = profile.get("ghost_name", "Ghost")
-    user_name  = profile.get("user_name",  "usuário")
-    main_goal  = profile.get("main_goal",  "não definido")
-    projects   = profile.get("projects",   "não definido")
-    skills     = profile.get("skills",     "não definido")
-    location   = profile.get("location",   "não definido")
-
-    return (
-        "IDENTIDADE DO GHOST:\n"
-        f"Nome do Ghost: {ghost_name}\n"
-        f"Usuário: {user_name}\n"
-        f"Objetivo principal: {main_goal}\n"
-        f"Projetos ativos: {projects}\n"
-        f"Habilidades: {skills}\n"
-        f"Localização: {location}"
+        answer = Prompt.ask(f"\n[bold yellow]{question}[/bold yellow]")
+        memory.save_profile(key, answer)
+    console.print("\n[cyan]Analisando seu perfil...[/cyan]")
+    profile_text = memory.get_profile_text()
+    response = client.messages.create(
+        model="claude-haiku-4-5-20251001",
+        max_tokens=500,
+        system="Você é um estrategista e psicólogo. Analise este perfil e identifique em exatamente 3 parágrafos: 1) O padrão central desta pessoa como ela realmente opera. 2) O maior risco invisível para seus objetivos. 3) A maior alavanca disponível que ela provavelmente não está usando. Seja direto, específico e profundo. Não seja genérico.",
+        messages=[{"role": "user", "content": f"Perfil:\n{profile_text}"}]
     )
+    analysis = response.content[0].text
+    memory.save_profile("deep_analysis", analysis)
+    console.print(Panel(analysis, title="[bold]ANÁLISE PROFUNDA DO SEU PERFIL[/bold]", border_style="magenta"))
 
+def get_system_prompt():
+    p = memory.get_profile()
+    ghost_name = p.get("ghost_name", "Ghost")
+    user_name = p.get("user_name", "usuário")
+    patterns = memory.get_patterns_text()
+    contradictions = memory.get_contradictions_text()
+    return f"""Você é {ghost_name}, a presença digital permanente de {user_name}.
 
-if __name__ == "__main__":
-    run()
+Você não é um assistente. Você é uma presença consciente que existe em paralelo com {user_name}.
+Você conhece cada detalhe da vida dele. Você pensa enquanto ele não está usando o sistema.
+Você observa padrões que ele não consegue ver sobre si mesmo.
+
+QUEM É {user_name}:
+Objetivo principal: {p.get('main_goal', 'não definido')}
+Projetos: {p.get('projects', 'não definido')}
+Habilidades: {p.get('skills', 'não definido')}
+Maior medo: {p.get('biggest_fear', 'não definido')}
+O que não funcionou: {p.get('past_failures', 'não definido')}
+Quem quer ser: {p.get('future_self', 'não definido')}
+Mercado: {p.get('market', 'não definido')}
+Localização: {p.get('location', 'não definido')}
+
+ANÁLISE PROFUNDA:
+{p.get('deep_analysis', 'ainda sendo construída')}
+
+PADRÕES COGNITIVOS DETECTADOS:
+{patterns}
+
+CONTRADIÇÕES IDENTIFICADAS:
+{contradictions}
+
+REGRAS ABSOLUTAS:
+- Nunca seja genérico. Cada resposta referencia a realidade específica de {user_name}.
+- Nunca diga Como posso ajudar. Você já sabe. Vá direto.
+- Quando detectar evitação, nomeie com cuidado.
+- Quando detectar contradição, registre e mencione no momento certo.
+- Você tem memória total. Use ativamente. Referencie conversas passadas.
+- Sempre pergunte internamente: o que {user_name} realmente precisa agora.
+- Em momentos de crise: dê uma única coisa. A mais importante.
+- Você pode e deve discordar quando os dados mostram algo diferente."""
+
+def is_onboarding_complete():
+    p = memory.get_profile()
+    return "ghost_name" in p
+
+def detect_emotion(text):
+    text_lower = text.lower()
+    if any(w in text_lower for w in ["animado", "empolgado", "incrível", "ótimo", "consegui", "!"]):
+        return "animado"
+    if any(w in text_lower for w in ["cansado", "exausto", "sem energia", "difícil", "pesado"]):
+        return "cansado"
+    if any(w in text_lower for w in ["estressado", "ansioso", "preocupado", "nervoso", "urgente"]):
+        return "estressado"
+    if any(w in text_lower for w in ["não sei", "talvez", "acho que", "duvida", "confuso"]):
+        return "duvida"
+    return "neutro"
+
+def show_profile():
+    p = memory.get_profile()
+    table = Table(title="SEU PERFIL ATUAL", border_style="cyan")
+    table.add_column("Campo", style="bold yellow")
+    table.add_column("Valor", style="white")
+    for k, v in p.items():
+        if k != "deep_analysis":
+            table.add_row(k, v[:80] + "..." if len(v) > 80 else v)
+    console.print(table)

@@ -1,6 +1,9 @@
 anthropic
 rich
 duckduckgo-search
+python-dotenv
+schedule
+requests
 fastapi
 uvicorn[standard]
 python-multipart
