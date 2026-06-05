@@ -215,11 +215,11 @@ def run_council(req: TopicRequest):
     ]
 
     def call_specialist(s):
-        text = llm.chat(s["prompt"], [{"role": "user", "content": full_question}], 300)
+        text = llm.chat(s["prompt"], [{"role": "user", "content": full_question}], 800)
         return s["name"], s["color"], text
 
     opinions: dict[str, dict] = {}
-    with ThreadPoolExecutor(max_workers=6) as pool:
+    with ThreadPoolExecutor(max_workers=3) as pool:
         futures = {pool.submit(call_specialist, s): s for s in SPECIALISTS}
         for future in as_completed(futures):
             name, color, text = future.result()
@@ -234,7 +234,7 @@ def run_council(req: TopicRequest):
             f"Em exatamente 3 linhas:\nLinha 1: Maior CONSENSO\nLinha 2: Maior CONFLITO\n"
             f"Linha 3: O que {p.get('user_name','você')} deve fazer PRIMEIRO"
         )}],
-        150
+        400
     )
 
     memory.save_action(topic, synthesis, "council")
@@ -265,11 +265,11 @@ def run_simulation(req: TopicRequest):
     ]
 
     def call_analyst(name, color, system):
-        text = llm.chat(system, [{"role": "user", "content": f"Perfil: {profile_text}\nIdeia: {topic}"}], 300)
+        text = llm.chat(system, [{"role": "user", "content": f"Perfil: {profile_text}\nIdeia: {topic}"}], 800)
         return name, color, text
 
     results: dict[str, dict] = {}
-    with ThreadPoolExecutor(max_workers=3) as pool:
+    with ThreadPoolExecutor(max_workers=2) as pool:
         futures = [pool.submit(call_analyst, *a) for a in ANALYSTS]
         for future in as_completed(futures):
             name, color, text = future.result()
@@ -282,7 +282,7 @@ def run_simulation(req: TopicRequest):
             "Quais 3 condições precisam ser verdadeiras HOJE para que esse futuro seja "
             "uma consequência inevitável em 18 meses? Máximo 150 palavras."
         )}],
-        200
+        500
     )
 
     memory.save_simulation(
